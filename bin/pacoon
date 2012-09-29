@@ -1,0 +1,10 @@
+#!perl
+use strict;
+use warnings;
+
+use App::pacoon;
+
+my $app = App::pacoon->new;
+$app->run;
+
+__END__
