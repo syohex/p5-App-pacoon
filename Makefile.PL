@@ -9,6 +9,7 @@ test_requires 'Test::More' => '0.98';
 
 requires 'ExtUtils::Installed';
 requires 'Class::Inspector';
+requires 'JSON::XS';
 
 install_script 'bin/pacoon';
 
