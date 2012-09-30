@@ -5,9 +5,9 @@ use 5.008_001;
 
 use Carp ();
 use Config;
-use Getopt::Long qw(:config posix_default no_ignore_case gnu_compat);
 use Class::Inspector;
 use ExtUtils::Installed;
+use JSON::XS;
 
 our $VERSION = '0.01';
 
@@ -22,46 +22,95 @@ sub new {
         out      => $out,
         modules  => [],
         perlpods => [],
+        json     => JSON::XS->new()->ascii(1),
     }, $class;
 }
 
-my %method_cache;
+my @method_cache;
 
 my %cmd_table = (
     modules => \&_output_modules,
-    pod     => \&_output_pods,
+    pods    => \&_output_pods,
     method  => \&_output_method,
 );
 
+sub _output_result {
+    my ($self, $result) = @_;
+    print {$self->{out}} $self->{json}->encode($result);
+}
+
 sub _output_method {
-    my $self = shift;
+    my ($self, $option) = @_;
 
-    for my $module (@_) {
-        if (exists $method_cache{$module}) {
-            print {$self->{out}} "$_\n" for @{$method_cache{$module}};
-        } else {
-            eval "require $module;";
-            if ($@) {
-                Carp::carp("Error: not found module '$module'");
-                next;
-            }
-
-            my $methods = Class::Inspector->methods($module, 'public', 'full');
-            $method_cache{$module} = $methods;
-
-            print {$self->{out}} "$_\n" for @{$methods};
-        }
+    my @options;
+    my $is_full = 0;
+    if ($option->{full}) {
+        $is_full = 1;
+        push @options, 'full';
     }
+
+    my $visibility;
+    if ($option->{visibility}) {
+        $visibility = $option->{visibility};
+        unless ($visibility) {
+            my $msg = "Invalid visibility parameter: '$visibility'";
+            $self->_output_result({ status => 'fail', result => $msg });
+            return;
+        }
+    } else {
+        $visibility = 'private';
+    }
+    push @options, $visibility;
+
+    my $cache = $method_cache[$is_full];
+    my @methods;
+    for my $module (@{$option->{modules}}) {
+        my $methods_ref;
+        if (exists $cache->{$module}) {
+            $methods_ref = @{ $cache->{$module} };
+        } else {
+            my $methods = $self->_collect_methods($module, @options);
+            return unless $methods;
+
+            $cache->{$module} = $methods;
+            $methods_ref = $methods;
+        }
+
+        push @methods, @{ $methods_ref };
+    }
+
+    my $res;
+    if (@methods) {
+        $res = { status => 'success', result => \@methods };
+    } else {
+        my $msg = "No methods found";
+        $res = { status => 'fail', result => $msg };
+    }
+
+    $self->_output_result($res);
+}
+
+sub _collect_methods {
+    my ($self, $module, @options) = @_;
+
+    eval "require $module; 1"; ## no critic
+    if ($@) {
+        my $msg = "Error: not found module '$module'";
+        $self->_output_result({ status => 'fail', result => $msg});
+        return;
+    }
+
+    Class::Inspector->methods($module, @options);
 }
 
 sub _output_modules {
     my $self = shift;
-    print {$self->{out}} "$_\n" for @{$self->{modules}};
+    $self->_output_result({ status => 'success', result => $self->{modules} });
 }
 
 sub _output_pods {
     my $self = shift;
-    print {$self->{out}} "$_\n" for (@{$self->{modules}}, @{$self->{perlpods}});
+    $self->_output_result({ status => 'success', result => $self->{perlpods} });
 }
 
 sub run {
@@ -69,7 +118,18 @@ sub run {
 
     $self->_init;
 
-    while (my $line = <STDIN>) {
+    my ($json, $in) = ($self->{json}, $self->{in});
+    my $chunk_size = 4096;
+    while (sysread $in, my $buf, $chunk_size) {
+        for my $req ( $json->incrparse($buf) ) {
+            next unless _valid_request($req);
+
+            my $cmd = $req->{command};
+            $cmd_table{$cmd}->($self, $req->{option});
+        }
+    }
+
+    while (my $line = <$in>) {
         chomp $line;
         next if $line eq '';
 
@@ -89,6 +149,24 @@ sub run {
 
         $cmd_table{$cmd}->($self, @args);
     }
+}
+
+sub _validate_request {
+    my ($self, $req) = @_;
+
+    my $cmd = $req->{command};
+    unless (defined $cmd) {
+        my $msg = 'Command not defined';
+        $self->_output_result({ status => 'fail', result => $msg });
+        return;
+    }
+
+    unless ($cmd =~ m{^(?:modules|pods|method)$}) {
+        my $msg = "Invalid command: '$cmd'";
+        $self->_output_result({ status => 'fail', result => $msg });
+    }
+
+    return 1;
 }
 
 sub _init {
