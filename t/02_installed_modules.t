@@ -7,7 +7,7 @@ use t::Util qw/is_contained/;
 
 subtest 'installed module' => sub {
     my $app = App::pacoon->new;
-    my @modules = $app->_installed_modules;
+    $app->_set_installed_modules;
     ok is_contained($app->{modules}, 'Encode'), 'has Encode';
 };
 
